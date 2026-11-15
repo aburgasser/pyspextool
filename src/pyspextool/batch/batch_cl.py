@@ -166,9 +166,9 @@ class runBatch():
 		if os.path.exists(folders[-1]):
 			for x in ['QA_IMAGE_FOLDER','QA_SPECTRA_FOLDER']:
 				if x in list(batch.BATCH_PARAMETERS.keys()):
-					if BATCH_PARAMETERS[x] != '':
-						if os.path.exists(os.path.join(folders[-1],BATCH_PARAMETERS[x]))==False
-							os.mkdir(os.path.join(folders[-1],BATCH_PARAMETERS[x]))
+					if batch.BATCH_PARAMETERS[x] != '':
+						if os.path.exists(os.path.join(folders[-1],batch.BATCH_PARAMETERS[x]))==False:
+							os.mkdir(os.path.join(folders[-1],batch.BATCH_PARAMETERS[x]))
 
 # check folders 
 #		folders = [os.path.abspath(f) for f in folders]
