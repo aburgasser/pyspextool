@@ -162,6 +162,14 @@ class runBatch():
 				os.mkdir(folders[i])
 				if args['quiet']==False: logging.info('\nCreated {} folder {}'.format(nm,folders[i]))
 
+# create inner qa folders 
+		if os.path.exists(folders[-1]):
+			for x in ['QA_IMAGE_FOLDER','QA_SPECTRA_FOLDER']:
+				if x in list(batch.BATCH_PARAMETERS.keys()):
+					if BATCH_PARAMETERS[x] != '':
+						if os.path.exists(os.path.join(folders[-1],BATCH_PARAMETERS[x]))==False
+							os.mkdir(os.path.join(folders[-1],BATCH_PARAMETERS[x]))
+
 # check folders 
 #		folders = [os.path.abspath(f) for f in folders]
 		if args['only_qa']==False:
@@ -170,35 +178,34 @@ class runBatch():
 				if os.path.exists(f)==False: raise ValueError('Cannot find {} folder {}'.format(batch.REDUCTION_FOLDERS[i],f)) 
 
 # generate log csv and html files and put in qa folder
-# modification to give log a unique name
 		if log_file_prefix=='': log_file_prefix = '{}_{}'.format(LOG_FILE_PREFIX_DEFAULT,(os.path.abspath(base_folder)).split(os.sep)[-1])
-#		if log_file_prefix=='': log_file_prefix = copy.deepcopy(LOG_FILE_PREFIX_DEFAULT)
 		else: log_file_prefix = log_file_prefix[0]
-		log_file_prefix = os.path.join(folders[3],log_file_prefix)
-		if os.path.exists(log_file_prefix+'.html')==True and os.path.exists(log_file_prefix+'.csv')==True and args['overwrite']==False and args['rebuild_log']==False:
-			logging.info('\nWARNING: html log file {} and csv log file {} already exists; use --overwrite if you want to overwrite or --rebuild-log to rebuild'.format(log_file_prefix+'.html',log_file_prefix+'.csv'))
+		log_file = os.path.join(folders[3],log_file_prefix+'.csv')
+		if os.path.exists(log_file)==True and os.path.exists(log_file.replace('.csv','.html'))==True and args['overwrite']==False and args['rebuild_log']==False:
+			logging.info('\nWARNING: log file {} already exists; use --overwrite if you want to overwrite or --rebuild-log to rebuild'.format(log_file))
 		else:
 			if args['only_driver']==False and args['only_extract']==False and args['only_fluxtell']==False and args['only_qa']==False:
 				dp = batch.processFolder(folders[0])
-				for x in ['.csv','.html']:
-					if os.path.exists(log_file_prefix+x) and args['overwrite']==False and args['rebuild_log']==False:
-						logging.info('\nWARNING: {} log file {} already exists so not saving; use --overwrite to overwrite'.format(x,log_file_prefix+x))
-					else:
-#						if args['quiet']==False: print('\nWriting log to {}'.format(log_file_prefix+x))
-#						logging.info(log_file_prefix+x)
-						batch.writeLog(dp,log_file=log_file_prefix+x)
+				if os.path.exists(log_file) and args['overwrite']==False and args['rebuild_log']==False:
+						logging.info('\nWARNING: log file {} already exists so not saving; use --overwrite to overwrite'.format(log_file))
+				else:
+					batch.writeLog(dp,log_file=log_file)
+					batch.log_to_html(log_file)
+				# for x in ['.csv','.html']:
+				# 	if os.path.exists(log_file_prefix+x) and args['overwrite']==False and args['rebuild_log']==False:
+				# 		logging.info('\nWARNING: {} log file {} already exists so not saving; use --overwrite to overwrite'.format(x,log_file_prefix+x))
+				# 	else:
+				# 		batch.writeLog(dp,log_file=log_file_prefix+x)
 
 # query to pause and check log
 				if args['no_pause']==False and args['only_log']==False: txt = input('\n\nCheck the LOG FILES {} and {} and press return when you are ready to proceed, or type CNTL-C to abort...\n\n'.format(log_file_prefix+'.csv',log_file_prefix+'.html'))
 
 		if args['only_log']==True: 
-			logging.info('\n\nLog files {} and {} created.'.format(log_file_prefix+'.csv',log_file_prefix+'.html'))
+			logging.info('\n\nLog files {} and {} created.'.format(logfile,log_file.replace('.csv','.html')))
 			return
 
 
 # generate driver file and put in proc folder
-# modification to give log a unique name
-#		if driver_file=='': driver_file = copy.deepcopy(DRIVER_FILE_DEFAULT)
 		if driver_file=='': driver_file = '{}_{}.txt'.format(DRIVER_FILE_PREFIX_DEFAULT,(os.path.abspath(base_folder)).split(os.sep)[-1])
 		else: driver_file = driver_file[0]
 		driver_file = os.path.join(folders[2],driver_file)
@@ -231,6 +238,8 @@ class runBatch():
 			# if os.path.isdir(driver_file)==True: raise ValueError('Parameter you passed - {} - is a directory; provide path to driver file'.format(driver_file)) 
 			if os.path.exists(driver_file)==False: raise ValueError('Cannot find driver file {}'.format(driver_file)) 
 			par = batch.readDriver(driver_file)
+			par['DRIVER_FILE'] = driver_file
+			par['LOG_FILE'] = log_file_prefix+'.csv'
 
 # stop if there are no science or calibration files
 #			print(par)
@@ -290,7 +299,8 @@ class runBatch():
 			if args['re_calibrate']==True: 
 				for x in ['CALIBRATIONS','EXTRACT','COMBINE']: par[x] = False
 				for x in ['FLUXTELL','STITCH','RENAME','OVERWRITE']: par[x] = True
-
+			par['QA_CONTINUOUS']==True
+			if args['no_qa']==True: par['QA_CONTINUOUS']==False
 			if args['quiet']==False: logging.info('\n\nReducing spectra\n\n')
 			batch.batchReduce(par,verbose=(not args['quiet']))
 
@@ -312,12 +322,11 @@ class runBatch():
 			logging.info('\n\nReduction completed!\n\n')
 			return
 
-		if os.path.exists(driver_file)==False: raise ValueError('Cannot find driver file {}'.format(driver_file)) 
-		if os.path.exists(log_file_prefix+'.csv')==False: raise ValueError('Cannot find log file {}'.format(log_file_prefix+'.csv')) 
-
-		batch.makeQApage(driver_file,log_file_prefix+'.csv',verbose=(not args['quiet']))
-
-		logging.info('\n\nQA page created, please review\n\n')
+		if os.path.exists(driver_file)==True and os.path.exists(log_file)==True: 
+			batch.makeQApage(driver_file,log_file,verbose=(not args['quiet']))
+			logging.info('\n\n QA page created, please review\n\n')
+		else:
+			logging.info('\n\n Unable to make QA page missing driver file {} or log file {}\n\n'.format(driver_file,log_file))
 
 		return
 

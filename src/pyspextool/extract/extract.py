@@ -46,6 +46,7 @@ def extract(
     fix_badpixels:bool=True,
     use_meanprofile:bool=False,
     badpixel_threshold:int | float=7,                    
+    noextract:bool=None,
     verbose:bool=None,
     qa_show:bool=None,
     qa_showscale:float | int=None,
@@ -481,6 +482,10 @@ def extract(
             qa_showblock=qa['showblock'],
             qa_write=qa['write'])
         
+
+        # INSERT BREAK IF WE DON'T WANT TO EXTRACT - JUST GENERATE QA IMAGES
+        if noextract==True: return
+
         # Identify apertures
 
         identify_apertures(

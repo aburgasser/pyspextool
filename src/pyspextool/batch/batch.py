@@ -13,13 +13,14 @@
 # - TESTING
 
 from astropy.io import fits
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord,match_coordinates_sky
 from astropy.time import Time
 from astropy.table import Table
 from astroquery.xmatch import XMatch
 from astroquery.simbad import Simbad
 from pyspextool.io.simbad_mirrors import simbad_available
 from astropy.utils.exceptions import AstropyWarning
+from astropy.coordinates import Angle,SkyCoord,Galactic,BarycentricTrueEcliptic,match_coordinates_sky,search_around_sky
 import astropy.units as u
 import copy
 import os
@@ -43,7 +44,7 @@ from pyspextool.io.files import extract_filestring,make_full_path
 from pyspextool.io.read_spectra_fits import read_spectra_fits
 from pyspextool.utils.arrays import numberList
 
-VERSION = '2026 May 29'
+VERSION = '2026 Nov 14'
 
 ERROR_CHECKING = True
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -92,9 +93,10 @@ HEADER_DATA={
 # these are default parameters for generating the log
 LOG_PARAMETERS = {
 	'FILENAME': 'log.csv',
+	'COLUMNS' : ['FILE','BEAM','TARGET_NAME','TARGET_TYPE','FIXED-MOVING','RA','DEC','SHORTNAME','UT_DATE','UT_TIME','MJD','AIRMASS','INTEGRATION','COADDS','INSTRUMENT','SLIT','MODE','PROGRAM','OBSERVER'],
+	'SIMBAD': True,
 	'HTML_TEMPLATE_FILE' : os.path.join(DIR,'log_template.txt'),
 	'BASE_HTML': r'<!DOCTYPE html>\n<html lang="en">\n\n<head>\n<title>SpeX Log</title>\n</head>\n\n<body>\n<h1>SpeX Log</h1>\n\n[TABLE]\n\n</body>\n</html>',	
-	'COLUMNS' : ['FILE','BEAM','TARGET_NAME','TARGET_TYPE','FIXED-MOVING','RA','DEC','SHORTNAME','UT_DATE','UT_TIME','MJD','AIRMASS','INTEGRATION','COADDS','INSTRUMENT','SLIT','MODE','PROGRAM','OBSERVER'],
 }
 
 # these are default batch reduction parameters
@@ -111,8 +113,8 @@ BATCH_PARAMETERS = {
 	'SCIENCE_FILE_PREFIX': 'spc',
 	'SPECTRA_FILE_PREFIX': 'spectra',
 	'COMBINED_IMAGE_FILE_PREFIX': 'combim',
-	'COMBINED_SPECTRA_FILE_PREFIX': 'spectra-combim',
-	'COMBINED_FILE_PREFIX': 'combspec',
+	'COMBINED_SPECTRA_FILE_PREFIX': 'combspec',
+	'COMBINED_SPECTRA_IMAGE_FILE_PREFIX': 'spectra-combim',
 	'TELLURIC_FILE_PREFIX': 'telluric',
 	'CALIBRATED_FILE_PREFIX': 'calspec',
 	'CALIBRATED_FILE_SUFFIX': 'comb',
@@ -218,6 +220,15 @@ SIMBAD_COLS = {
 	'SIMBAD_JMAG': ['J','FLUX_J'],
 	'SIMBAD_HMAG': ['H','FLUX_H'],
 	'SIMBAD_KMAG': ['K','FLUX_K'],
+	# 'NAME': ['main_id','MAIN_ID'],
+	# 'TYPE': ['sptype','SP_TYPE'],
+	# 'CLASS': ['otype','OTYPE'],
+	# 'BMAG': ['fluxdata(B)','FLUX_B'],
+	# 'VMAG': ['fluxdata(V)','FLUX_V'],
+	# 'GMAG': ['fluxdata(G)','FLUX_G'],
+	# 'JMAG': ['fluxdata(J)','FLUX_J'],
+	# 'HMAG': ['fluxdata(H)','FLUX_H'],
+	# 'KMAG': ['fluxdata(K)','FLUX_K'],
 }
 
 # what to exclude when searching for standard information
@@ -233,6 +244,7 @@ QA_IMAGE_FOLDER = 'images'
 QA_SPECTRA_FOLDER = 'spectra'
 DEFAULT_TARGET_NAMES = ['','Object_Observed']
 OBSERVER_SCHEDULE_FILE = os.path.join(DIR,'observer_schedule.csv')
+TYCHO_FILE = os.path.join(DIR,'tycho.csv')
 
 ###################################
 ######### HELPER FUNCTIONS ########
@@ -938,39 +950,50 @@ def writeLog(dp,log_file='',options={},verbose=ERROR_CHECKING):
 	sb = Simbad()
 	sb.server = Simbad.server  # use the mirror chosen by simbad_available()
 	for x in SIMBAD_COLS.keys(): sb.add_votable_fields(SIMBAD_COLS[x][0])
+# OBTAIN SOURCE INFORMATION FOR FLUX/TELLURE STARS
 	if use_simbad:
+#	if 'RA' in list(dpout.columns) and 'DEC' in list(dpout.columns):
 		dpouts = dpout[dpout['TARGET_TYPE'] != 'calibration']
 		dpouts.reset_index(inplace=True)
 		tnames = list(set(list(dpouts['TARGET_NAME'])))
 		tnames = [str(x) for x in tnames]
-		for i,tnm in enumerate(tnames):
-			dpsel = dpout[dpout['TARGET_NAME']==tnm]
-			dpsel.reset_index(inplace=True)
-			if len(dpsel)>0:
-				src_coord = SkyCoord(dpsel.loc[0,'RA']+' '+dpsel.loc[0,'DEC'],unit=(u.hourangle, u.deg))
-				t_match = sb.query_region(src_coord,radius=SIMBAD_RADIUS)
-				if isinstance(t_match,type(None))==False:
-					dp_match = t_match.to_pandas()
-					if len(t_match)>0:
+
+# first option - use SIMBAD
+		if parameters['SIMBAD']==True:
+# add in SIMBAD information using astroquery.simbad
+# try statement to catch cases where simbad is not accessible
+			try:
+				sb = Simbad()
+				if verbose==True: logging.info(' Matching flux standards to SIMBAD catalog')
+				for x in SIMBAD_COLS.keys(): sb.add_votable_fields(SIMBAD_COLS[x][0])
+				for i,tnm in enumerate(tnames):
+					dpsel = dpout[dpout['TARGET_NAME']==tnm]
+					dpsel.reset_index(inplace=True)
+					if len(dpsel)>0:
+						src_coord = SkyCoord(dpsel.loc[0,'RA']+' '+dpsel.loc[0,'DEC'],unit=(u.hourangle, u.deg))
+						t_match = sb.query_region(src_coord,radius=SIMBAD_RADIUS)
+						if isinstance(t_match,type(None))==False:
+							dp_match = t_match.to_pandas()
+							if len(t_match)>0:
 # astroquery fix: ==0.4.7 was upper case, >0.4.7 was lower case 
-						if 'otype' in list(dp_match.columns):
-							swap = {}
-							for x in list(dp_match.columns): swap[x] = x.upper()
-							dp_match.rename(columns=swap,inplace=True)
+								if 'otype' in list(dp_match.columns):
+									swap = {}
+									for x in list(dp_match.columns): swap[x] = x.upper()
+									dp_match.rename(columns=swap,inplace=True)
 # astroquery fix: ==0.4.7 was FLUX_B, >0.4.7 was B 
-						if 'V' in list(dp_match.columns):
-							swap = {}
-							for x in list(SIMBAD_COLS.keys()): 
-								if 'MAG' in x: swap[SIMBAD_COLS[x][1].replace('FLUX_','')] = SIMBAD_COLS[x][1]
-							dp_match.rename(columns=swap,inplace=True)
-						for x in SIMBAD_EXCLUDE: dp_match = dp_match[dp_match['OTYPE']!=x]
-					if len(dp_match)>0:
-						dp_match.reset_index(inplace=True)
-						dp_match['SIMBAD_SEP'] = [src_coord.separation(SkyCoord(str(dp_match.loc[lp,'RA']),str(dp_match.loc[lp,'DEC']),unit=(u.degree,u.degree))).arcsecond for lp in np.arange(len(dp_match))]
-						dp_match.sort_values('SIMBAD_SEP',inplace=True,ignore_index=True)
-						for x in list(SIMBAD_COLS.keys()):
-							dpout.loc[dpout['TARGET_NAME']==tnm,x] = str(dp_match.loc[0,SIMBAD_COLS[x][1]])
-						dpout.loc[dpout['TARGET_NAME']==tnm,'SIMBAD_SEP'] = '{:.2f}'.format(dp_match.loc[0,'SIMBAD_SEP'])
+								if 'V' in list(dp_match.columns):
+									swap = {}
+									for x in list(SIMBAD_COLS.keys()): 
+										if 'MAG' in x: swap[SIMBAD_COLS[x][1].replace('FLUX_','')] = SIMBAD_COLS[x][1]
+									dp_match.rename(columns=swap,inplace=True)
+								for x in SIMBAD_EXCLUDE: dp_match = dp_match[dp_match['OTYPE']!=x]
+							if len(dp_match)>0:
+								dp_match.reset_index(inplace=True)
+								dp_match['MATCH_SEP'] = [src_coord.separation(SkyCoord(str(dp_match.loc[lp,'RA']),str(dp_match.loc[lp,'DEC']),unit=(u.degree,u.degree))).arcsecond for lp in np.arange(len(dp_match))]
+								dp_match.sort_values('MATCH_SEP',inplace=True,ignore_index=True)
+								for x in list(SIMBAD_COLS.keys()):
+									dpout.loc[dpout['TARGET_NAME']==tnm,x] = str(dp_match.loc[0,SIMBAD_COLS[x][1]])
+								dpout.loc[dpout['TARGET_NAME']==tnm,'MATCH_SEP'] = '{:.2f}'.format(dp_match.loc[0,'MATCH_SEP'])
 				# t = Table([[src_coord.ra.deg],[src_coord.dec.deg]],names=('ra','dec'))
 			# t_match = XMatch.query(t,u'simbad',SIMBAD_RADIUS,colRA1='ra',colDec1='dec',columns=["**", "+_r"])
 			# t_match.sort(['angDist'])
@@ -981,11 +1004,33 @@ def writeLog(dp,log_file='',options={},verbose=ERROR_CHECKING):
 			# if len(t_match)>0:
 			# 	for x in list(SIMBAD_COLS.keys()):
 				# 		dpout.loc[dpout['TARGET_NAME']==tnm,x] = t_match[SIMBAD_COLS[x]][0]
-#	except: logging.info('WARNING: There was a problem in trying to match targets to SIMBAD via astroquery.simbad; check internet connection')
+			except: parameters['SIMBAD']=False
+
+# instead built in built in tycho catalog
+		if parameters['SIMBAD']==False:
+			if verbose==True: logging.info(' Matching flux standards to Tycho catalog')
+			tycho_cat = pd.read_csv(TYCHO_FILE)
+			tycho_cat['COORD'] = [SkyCoord(ra=float(tycho_cat.loc[i,'RA'])*u.deg,dec=float(tycho_cat.loc[i,'DEC'])*u.deg) for i in range(len(tycho_cat))]
+			for i,tnm in enumerate(tnames):
+				dpsel = dpout[dpout['TARGET_NAME']==tnm]
+				dpsel.reset_index(inplace=True)
+				if len(dpsel)>0:
+					src_coord = SkyCoord(dpsel.loc[0,'RA']+' '+dpsel.loc[0,'DEC'],unit=(u.hourangle, u.deg))
+					tsmall = tycho_cat[np.absolute(tycho_cat['DEC']-src_coord.dec.degree)<1]
+					tsmall = tsmall[np.absolute(tsmall['RA']-src_coord.ra.degree)<1]
+					tsmall['MATCH_SEP'] = [src_coord.separation(c).arcsec for c in tsmall['COORD']]
+					tmatch=tsmall[tsmall['MATCH_SEP']<=SIMBAD_RADIUS.to(u.arcsec).value]
+					if len(tmatch)>0:
+						tmatch.reset_index(inplace=True)
+						tmatch.sort_values('MATCH_SEP',inplace=True,ignore_index=True)
+						for x in list(SIMBAD_COLS.keys()):
+							if x in list(tmatch.columns):
+								dpout.loc[dpout['TARGET_NAME']==tnm,x] = str(tmatch.loc[0,x])
+						dpout.loc[dpout['TARGET_NAME']==tnm,'MATCH_SEP'] = '{:.2f}'.format(tmatch.loc[0,'MATCH_SEP'])
 
 # add on a NOTES column
 	dpout['NOTES'] = ['']*len(dpout)
-	
+
 # save depends on file name
 	ftype = parameters['FILENAME'].split('.')[-1]
 	if ftype in ['xls','xlsx']: dpout.to_excel(parameters['FILENAME'],index=False)	
@@ -995,7 +1040,7 @@ def writeLog(dp,log_file='',options={},verbose=ERROR_CHECKING):
 	elif ftype in ['tex']: dpout.to_latex(parameters['FILENAME'],longtable=True,index=False)	
 	elif ftype in ['json']: dpout.to_json(parameters['FILENAME'])	
 	elif ftype in ['htm','html']:
-		dpout.style.apply(logTablestyle)
+		dpout.style.apply(logTablestyle(True))
 		if parameters['HTML_TEMPLATE_FILE'] != '' and os.path.exists(parameters['HTML_TEMPLATE_FILE']):
 			with open(parameters['HTML_TEMPLATE_FILE'],'r') as f: dphtml = f.read()
 		else: dphtml = copy.deepcopy(parameters['BASE_HTML'])
@@ -1010,6 +1055,35 @@ def writeLog(dp,log_file='',options={},verbose=ERROR_CHECKING):
 	return
 
 
+# simple quick converter
+def log_to_html(infile,outfile='',html_template_file=LOG_PARAMETERS['HTML_TEMPLATE_FILE'],verbose=ERROR_CHECKING):
+# read in based on file type
+	ftype = infile.split('.')[-1]
+	if ftype in ['xls','xlsx']: dp = pd.read_excel(infile)	
+	elif ftype in ['csv']: dp = pd.read_csv(infile,sep=',')	
+	elif ftype in ['tsv','txt','tab']: dp = pd.read_csv(infile,sep='\t')	
+	elif ftype in ['psv']: dp = pd.read_csv(infile,sep='|')	
+	else: 
+		if verbose==True: logging.info(' Cannot read in file {}; no conversion done'.format(infile))
+	if outfile=='': outfile = infile.replace('.'+ftype,'.html')
+
+# make table
+#	dp.style.apply(logTablestyle(True))
+	dptbl = dp.to_html(classes='table table-striped text-center',index=False,bold_rows=True)
+# use template - should include tags [TABLE], [INSTRUMENT], and [UT_DATE]
+	if html_template_file != '' and os.path.exists(html_template_file):
+		with open(html_template_file,'r') as f: dphtml = f.read()
+		for x in ['INSTRUMENT','UT_DATE']:
+			if x in list(dp.columns): 
+				dphtml = dphtml.replace('[{}]'.format(x),dp.loc[0,x])
+		dphtml = dphtml.replace('[TABLE]',dptbl)
+		with open(outfile,'w') as f: f.write(dphtml)
+# just output table
+	else: 
+		with open(outfile,'w') as f: f.write(dptbl)
+
+	if verbose==True: logging.info('log written to {}'.format(outfile))
+	return	
 
 
 #############################
@@ -1052,7 +1126,7 @@ def readDriver(driver_file,options={},verbose=ERROR_CHECKING):
 		CALIBRATED_FILE_PREFIX: calspec
 		CAL_FOLDER: /Users/adam/projects/spex_archive/testing/150512/cals/
 		CAL_SETS: 34-39,70-75,92-97,114-119,142-147
-		COMBINED_FILE_PREFIX: combspec
+		COMBINED_SPECTRA_FILE_PREFIX: combspec
 		DATA_FOLDER: /Users/adam/projects/spex_archive/testing/150512/data/
 		...
 		
@@ -1336,7 +1410,7 @@ def writeDriver(dp,driver_file='driver.txt',data_folder='',options={},create_fol
 	f.write('\n# Folders and files\n')
 	for x in ['DATA_FOLDER','CALS_FOLDER','PROC_FOLDER','QA_FOLDER']:
 		f.write('{} = {}\n'.format(x,str(driver_param[x])))
-	for x in ['SCIENCE_FILE_PREFIX','SPECTRA_FILE_PREFIX','COMBINED_FILE_PREFIX','TELLURIC_FILE_PREFIX','CALIBRATED_FILE_PREFIX','MERGED_FILE_PREFIX']:
+	for x in ['SCIENCE_FILE_PREFIX','SPECTRA_FILE_PREFIX','COMBINED_SPECTRA_FILE_PREFIX','TELLURIC_FILE_PREFIX','CALIBRATED_FILE_PREFIX','MERGED_FILE_PREFIX']:
 		f.write('{} = {}\n'.format(x,str(driver_param[x])))
 
 # modes
@@ -1367,6 +1441,7 @@ def writeDriver(dp,driver_file='driver.txt',data_folder='',options={},create_fol
 			dpstdx = dpstd[dpstd['TARGET_NAME']==snm]
 			dpstdx.reset_index(inplace=True)
 			fnum = np.array(dpstdx['FILE NUMBER'])
+# PROBLEM HERE WHEN THERE IS ONLY 2 STANDARDS - FIGURE OUT A DIFFERENT CONSTRAINT			
 			calf1 = fnum[np.where(np.abs(fnum-np.roll(fnum,1))>1)]
 			calf2 = fnum[np.where(np.abs(fnum-np.roll(fnum,-1))>1)]
 	#		print(snm,fnum,calf1,calf2)
@@ -1780,14 +1855,14 @@ def makeQApage(driver_input,log_input,image_folder=QA_IMAGE_FOLDER,spectra_folde
 # fix for distributed file list
 			tmp = re.split('[,-]',sci_param['{}_FILES'.format(x)])
 			fsuf = '{}-{}'.format(tmp[0],tmp[-1])
-			# imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],'{}{}*_raw{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			# imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],'{}{}*_raw{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			# if len(imfile)==0:
-			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_raw{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_raw{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			# if len(imfile)>0:
 			# 	ptxt+=copy.deepcopy(single_txt).replace('[IMAGE]',os.path.join(image_folder,os.path.basename(imfile[0]))).replace('[IMAGE_WIDTH]',str(qa_parameters['IMAGE_WIDTH']))
-			imfiles = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_scaled{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			imfiles = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_scaled{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			# if len(imfile)==0:
-			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_scaled{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}*_scaled{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			if len(imfiles)>0:
 				ptxt=copy.deepcopy(single_txt).replace('[IMAGE]',os.path.join(image_folder,os.path.basename(imfiles[0]))).replace('[IMAGE_WIDTH]',str(qa_parameters['IMAGE_WIDTH'])).replace('[IMAGE_NAME]',os.path.basename(imfiles[0]))
 				fitsfile = os.path.join(qa_parameters['QA_FOLDER'],spectra_folder,os.path.basename(imfiles[0]).replace(qa_parameters['PLOT_TYPE'],'.fits'))
@@ -1801,9 +1876,9 @@ def makeQApage(driver_input,log_input,image_folder=QA_IMAGE_FOLDER,spectra_folde
 					ptxt = ptxt.replace('[CSV]','[<a href="{}" download="{}">{}</a>]'.format(os.path.join(spectra_folder,csvfile),csvfile,csvfile))
 				else: ptxt=ptxt.replace('[CSV]','')
 				ptxt0+=ptxt
-			imfiles = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			imfiles = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			# if len(imfile)==0:
-			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}{}'.format(driver['COMBINED_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
+			# 	imfile = glob.glob(os.path.join(qa_parameters['QA_FOLDER'],image_folder,'{}{}{}'.format(driver['COMBINED_SPECTRA_FILE_PREFIX'],fsuf,qa_parameters['PLOT_TYPE'])))
 			if len(imfiles)>0: 
 				ptxt=copy.deepcopy(single_txt).replace('[IMAGE]',os.path.join(image_folder,os.path.basename(imfiles[0]))).replace('[IMAGE_WIDTH]',str(qa_parameters['IMAGE_WIDTH'])).replace('[IMAGE_NAME]',os.path.basename(imfiles[0]))
 				fitsfile = os.path.join(qa_parameters['QA_FOLDER'],spectra_folder,os.path.basename(imfiles[0]).replace(qa_parameters['PLOT_TYPE'],'.fits'))
@@ -2077,6 +2152,9 @@ def makeQApage(driver_input,log_input,image_folder=QA_IMAGE_FOLDER,spectra_folde
 ###### BATCH REDUCTION ######
 #############################
 
+## CURRENT PROJECT:
+## run make QA page after each source
+## generate all the subtracted images first, then all the extractions
 
 def batchReduce(parameters,verbose=ERROR_CHECKING):
 	'''
@@ -2151,6 +2229,9 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 # default parameters
 	if 'VERBOSE' not in list(parameters.keys()): parameters['VERBOSE']=verbose
 	parameters['VERBOSE'] = (parameters['VERBOSE'] or verbose)
+# backwards compatability
+	if 'QA_CONTINUOUS' not in list(parameters.keys()): parameters['QA_CONTINUOUS'] = True
+	if 'DRIVER_FILE' not in list(parameters.keys()) or 'LOG_FILE' not in list(parameters.keys()): parameters['QA_CONTINUOUS'] = False
 
 # set up instrument
 	ps.pyspextool_setup(parameters['INSTRUMENT'],raw_path=parameters['DATA_FOLDER'], cal_path=parameters['CALS_FOLDER'], \
@@ -2160,6 +2241,11 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 	for x in ['QA_IMAGE_FOLDER','QA_SPECTRA_FOLDER']:
 		if os.path.exists(os.path.join(parameters['QA_FOLDER'],parameters[x]))==False:
 			os.mkdir(os.path.join(parameters['QA_FOLDER'],parameters[x]))
+
+# make initial qa page
+	if parameters['QA_CONTINUOUS']==True: 
+		batch.makeQApage(parameters['DRIVER_FILE'],parameters['LOG_FILE'],verbose=parameters['VERBOSE'])
+		if parameters['VERBOSE']==True: logging.info(' Set up initial QA page')
 
 # reduce all calibrations
 	cal_sets = parameters['CAL_SETS'].split(',')
@@ -2216,6 +2302,11 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 				if parameters['VERBOSE']==True: logging.info(' wavecal{}.fits already created, skipping (use --overwrite option to remake)'.format(cs))
 
 
+# make post-cal qa page
+	if parameters['QA_CONTINUOUS']==True: 
+		batch.makeQApage(parameters['DRIVER_FILE'],parameters['LOG_FILE'],verbose=verbose)
+		if parameters['VERBOSE']==True: logging.info(' QA page update with calibrations')
+
 # TO DO - CHANGE THE ORDER OF THIS:
 #  - DO ALL PAIRWISE SUBTRACTIONS AND SAVE IMAGES --> MAKE QA PAGE
 #  - DO ALL STANDARDS (EXTRACT AND COMBINE AND FLUX COORECTION) --> MAKE QA PAGE
@@ -2232,7 +2323,7 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 		if parameters['VERBOSE']==True: logging.info('No science files to reduce')
 		return
 
-### EXTRACTION			  ###
+### EXTRACTION ###
 	if parameters['EXTRACT']==True:
 		for k in scikeys:
 			spar = parameters[k]
@@ -2264,6 +2355,24 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 					if nim>1: fnum+=',{}'.format(fnums[loop*nim+1])
 					if parameters['VERBOSE']==True: logging.info(' Extracting files {}'.format(fnum))
 
+# if doing qa check - first do subtraction and aperture trace only
+					if parameters['QA_CONTINUOUS']==True:
+						ps.extract.extract(spar['STD_REDUCTION_MODE'],
+							[spar['STD_PREFIX'],fnum], # do just a pair
+							spar['STD_FLAT_FILE'],
+							spar['STD_WAVECAL_FILE'],
+							aperture_find,
+							spar['STD_APERTURE'],
+							linearity_correction=True, # default, may not to make variable
+							detector_info={'correct_bias':True},
+							flat_field=True, # default, may not to make variable
+							noextract=True,
+							verbose=parameters['VERBOSE'],
+							)						
+						batch.makeQApage(parameters['DRIVER_FILE'],parameters['LOG_FILE'],verbose=verbose)
+						if parameters['VERBOSE']==True: logging.info(' QA page for images {}'.format(fnum))
+
+# now do the full extract
 					ps.extract.extract(spar['STD_REDUCTION_MODE'],
 						[spar['STD_PREFIX'],fnum], # do just a pair
 #						[spar['STD_PREFIX'],spar['STD_FILES']], # do all pairs
@@ -2362,6 +2471,25 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 						if nim>1: fnum+=',{}'.format(fnums[loop*nim+1])
 						if parameters['VERBOSE']==True: logging.info(' Extracting files {}'.format(fnum))
 
+# if doing qa check - first do subtraction and aperture trace only
+						if parameters['QA_CONTINUOUS']==True:
+							ps.extract.extract(
+								spar['TARGET_REDUCTION_MODE'],
+								[spar['TARGET_PREFIX'],fnum], # do just a pair
+								spar['TARGET_FLAT_FILE'],
+								spar['TARGET_WAVECAL_FILE'],
+								aperture_find,
+								spar['TARGET_APERTURE'],
+								linearity_correction=True, # default, may not to make variable
+								detector_info={'correct_bias':True},
+								flat_field=True, # default, may not to make variable
+								noextract=True,
+								verbose=parameters['VERBOSE'],
+								)						
+							batch.makeQApage(parameters['DRIVER_FILE'],parameters['LOG_FILE'],verbose=verbose)
+
+# now do the full extract
+
 						ps.extract.extract(
 							spar['TARGET_REDUCTION_MODE'],
 							[spar['TARGET_PREFIX'],fnum], # do just a pair
@@ -2399,7 +2527,7 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 # check for existing file
 			tmp = re.split('[,-]',spar['TARGET_FILES'])
 			fsuf = '{}-{}'.format(tmp[0],tmp[-1])
-			outfile = '{}{}'.format(spar['COMBINED_FILE_PREFIX'],fsuf)
+			outfile = '{}{}'.format(spar['COMBINED_SPECTRA_FILE_PREFIX'],fsuf)
 			if os.path.exists(os.path.join(spar['PROC_FOLDER'],'{}.fits'.format(outfile)))==True and parameters['OVERWRITE']==False:
 				if parameters['VERBOSE']==True: logging.info(' Combined spectral file {}.fits already created, skipping (use --overwrite option to remake)'.format(outfile))
 			else:
@@ -2446,12 +2574,14 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 							verbose=parameters['VERBOSE'],
 						)
 
+
+
 ### FLUX CAL ###
 
 # fix for distributed file list
 			tmp = re.split('[,-]',spar['STD_FILES'])
 			fsuf = '{}-{}'.format(tmp[0],tmp[-1])
-			outfile = '{}{}'.format(spar['COMBINED_FILE_PREFIX'],fsuf)
+			outfile = '{}{}'.format(spar['COMBINED_SPECTRA_FILE_PREFIX'],fsuf)
 
 			indexinfo = {'nint': setup.state['nint'], 'prefix': spar['SPECTRA_FILE_PREFIX'], 'suffix': '', 'extension': '.fits'}
 			fnums =  extract_filestring(spar['STD_FILES'],'index')
@@ -2483,6 +2613,12 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 					verbose=parameters['VERBOSE'],
 				)
 
+# make post-cal qa page
+	if parameters['QA_CONTINUOUS']==True: 
+		batch.makeQApage(parameters['DRIVER_FILE'],parameters['LOG_FILE'],verbose=verbose)
+		if parameters['VERBOSE']==True: logging.info(' QA page update with combined spectra')
+
+
 
 ####################
 ## FLUX CALIBRATE ##
@@ -2511,8 +2647,8 @@ def batchReduce(parameters,verbose=ERROR_CHECKING):
 
 			else:
 # prep file names
-				objfile = '{}{}.fits'.format(spar['COMBINED_FILE_PREFIX'],tsuf)
-				stdfile = '{}{}.fits'.format(spar['COMBINED_FILE_PREFIX'],csuf)
+				objfile = '{}{}.fits'.format(spar['COMBINED_SPECTRA_FILE_PREFIX'],tsuf)
+				stdfile = '{}{}.fits'.format(spar['COMBINED_SPECTRA_FILE_PREFIX'],csuf)
 				tellfile = '{}{}'.format(spar['TELLURIC_FILE_PREFIX'],csuf)
 
 # depends on fixed or moving source which method we use

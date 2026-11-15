@@ -5,7 +5,7 @@ state = {"instruments": ['uspex', 'spex'],
                   'ergs s-1 cm-2 Hz-1', 'Jy', 'mJy', 'uJy'],
          "version": None,
          "telluric_correctiontypes":['A0 V', 'basic', 'reflectance'],
-         "reduction_modes":['A','A-B'],
+         "reduction_modes":['A','A-B','A-SKY'],
          "rectification_methods":['linear','cubic'],
          "vega_zmag":-0.03,
          "vega_zfd":3.46e-9*10, # ergs s-1 cm-2 A-1
